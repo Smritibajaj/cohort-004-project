@@ -1,6 +1,6 @@
 import { eq, and, sql, gt, lt, gte, lte } from "drizzle-orm";
 import { db } from "~/db";
-import { lessons } from "~/db/schema";
+import { lessonComments, lessons } from "~/db/schema";
 
 // ─── Lesson Service ───
 // Handles lesson CRUD and reordering within modules.
@@ -104,6 +104,7 @@ export function updateLessonContent(id: number, content: string) {
 }
 
 export function deleteLesson(id: number) {
+  db.delete(lessonComments).where(eq(lessonComments.lessonId, id)).run();
   return db.delete(lessons).where(eq(lessons.id, id)).returning().get();
 }
 

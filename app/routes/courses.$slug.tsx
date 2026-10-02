@@ -1,6 +1,7 @@
 import { useEffect } from "react";
-import { Link, useSearchParams } from "react-router";
+import { Link, useFetcher, useSearchParams } from "react-router";
 import { toast } from "sonner";
+import { z } from "zod";
 import type { Route } from "./+types/courses.$slug";
 import {
   getCourseBySlug,
@@ -42,6 +43,16 @@ import { formatDuration, formatPrice } from "~/lib/utils";
 import { renderMarkdown } from "~/lib/markdown.server";
 import { resolveCountry } from "~/lib/country.server";
 import { calculatePppPrice, getCountryTierInfo } from "~/lib/ppp";
+import { parseFormData } from "~/lib/validation";
+import {
+  getCourseRatingSummary,
+  getUserRatingForCourse,
+  rateCourse,
+} from "~/services/ratingService";
+import {
+  StarRatingDisplay,
+  StarRatingInput,
+} from "~/components/star-rating";
 
 export function meta({ data: loaderData }: Route.MetaArgs) {
   const title = loaderData?.course?.title ?? "Course";
@@ -71,11 +82,13 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   let progress = 0;
   let lessonProgressMap: Record<number, string> = {};
   let nextLessonId: number | null = null;
+  let userRating: number | null = null;
 
   if (currentUserId) {
     enrolled = isUserEnrolled(currentUserId, course.id);
 
     if (enrolled) {
+      userRating = getUserRatingForCourse(currentUserId, course.id);
       progress = calculateProgress(currentUserId, course.id, false, false);
 
       const progressRecords = getLessonProgressForCourse(
@@ -101,6 +114,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     ? calculatePppPrice(courseWithDetails.price, country)
     : courseWithDetails.price;
   const tierInfo = getCountryTierInfo(country);
+  const ratingSummary = getCourseRatingSummary(course.id);
 
   return {
     course: courseWithDetails,
@@ -113,10 +127,54 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     currentUserId,
     pppPrice,
     tierInfo,
+    ratingSummary,
+    userRating,
   };
 }
 
-// No action — enrollment is handled via the purchase confirmation page
+// Enrollment is handled via the purchase confirmation page; the only action
+// here is rating the course.
+const rateCourseSchema = z.object({
+  intent: z.literal("rate-course"),
+  rating: z.coerce.number().int().min(1).max(5),
+});
+
+export async function action({ params, request }: Route.ActionArgs) {
+  const currentUserId = await getCurrentUserId(request);
+  if (!currentUserId) {
+    throw data("Select a user from the DevUI panel to rate courses.", {
+      status: 401,
+    });
+  }
+
+  const course = getCourseBySlug(params.slug);
+  if (!course) {
+    throw data("Course not found", { status: 404 });
+  }
+
+  const formData = await request.formData();
+  const parsed = parseFormData(formData, rateCourseSchema);
+  if (!parsed.success) {
+    return data(
+      { error: "Rating must be between 1 and 5 stars." },
+      { status: 400 }
+    );
+  }
+
+  try {
+    rateCourse(currentUserId, course.id, parsed.data.rating);
+  } catch (error) {
+    return data(
+      {
+        error:
+          error instanceof Error ? error.message : "Could not save rating.",
+      },
+      { status: 403 }
+    );
+  }
+
+  return { success: true };
+}
 
 export function HydrateFallback() {
   return (
@@ -181,6 +239,8 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
     currentUserId,
     pppPrice,
     tierInfo,
+    ratingSummary,
+    userRating,
   } = loaderData;
   const isInstructor = currentUserId === course.instructorId;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -301,7 +361,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
         <p className="mb-4 text-lg text-muted-foreground">
           {course.description}
         </p>
-        <div className="flex items-center gap-4 text-sm text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
           <span className="flex items-center gap-1.5">
             <UserAvatar
               name={course.instructorName}
@@ -310,6 +370,10 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
             />
             {course.instructorName}
           </span>
+          <StarRatingDisplay
+            average={ratingSummary.average}
+            count={ratingSummary.count}
+          />
           <span className="flex items-center gap-1">
             <BookOpen className="size-4" />
             {lessonCount} lessons
@@ -407,6 +471,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
                         </Link>
                       ) : null;
                     })()}
+                  <RateCourse userRating={userRating} />
                   <Link to={teamPurchaseLink}>
                     <Button variant="outline" className="w-full">
                       <Users className="mr-2 size-4" />
@@ -446,6 +511,41 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
           </Card>
         </div>
       </div>
+    </div>
+  );
+}
+
+function RateCourse({ userRating }: { userRating: number | null }) {
+  const fetcher = useFetcher<typeof action>();
+
+  useEffect(() => {
+    if (fetcher.state !== "idle" || !fetcher.data) return;
+    if ("error" in fetcher.data) {
+      toast.error(fetcher.data.error);
+    } else {
+      toast.success("Thanks for rating this course!");
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  // Show the submitted value immediately while the request is in flight
+  const pendingRating = fetcher.formData?.get("rating");
+  const value = pendingRating ? Number(pendingRating) : userRating;
+
+  return (
+    <div className="rounded-md border p-3">
+      <div className="mb-2 text-sm font-medium">
+        {userRating ? "Your rating" : "Rate this course"}
+      </div>
+      <StarRatingInput
+        value={value}
+        disabled={fetcher.state !== "idle"}
+        onChange={(rating) =>
+          fetcher.submit(
+            { intent: "rate-course", rating: String(rating) },
+            { method: "post" }
+          )
+        }
+      />
     </div>
   );
 }
