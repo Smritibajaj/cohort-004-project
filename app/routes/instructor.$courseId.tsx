@@ -33,6 +33,7 @@ import {
   reorderLessons,
   moveLessonToModule,
 } from "~/services/lessonService";
+import { getCommentCountsForCourse } from "~/services/commentService";
 import { getEnrollmentCountForCourse, getCourseEnrolledStudents } from "~/services/enrollmentService";
 import { calculateProgress } from "~/services/progressService";
 import { getQuizByLessonId, getBestAttempt } from "~/services/quizService";
@@ -69,6 +70,7 @@ import {
   Award,
   Globe,
   FileText,
+  MessageSquare,
 } from "lucide-react";
 import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
@@ -185,7 +187,16 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 
   const quizCount = lessonQuizzes.length;
 
-  return { course, lessonCount, enrollmentCount, students, quizCount };
+  const commentCounts = Object.fromEntries(getCommentCountsForCourse(courseId));
+
+  return {
+    course,
+    lessonCount,
+    enrollmentCount,
+    students,
+    quizCount,
+    commentCounts,
+  };
 }
 
 export async function action({ params, request }: Route.ActionArgs) {
@@ -984,7 +995,14 @@ function statusBadgeColor(status: string) {
 export default function InstructorCourseEditor({
   loaderData,
 }: Route.ComponentProps) {
-  const { course, lessonCount, enrollmentCount, students, quizCount } = loaderData;
+  const {
+    course,
+    lessonCount,
+    enrollmentCount,
+    students,
+    quizCount,
+    commentCounts,
+  } = loaderData;
   const statusFetcher = useFetcher();
   const reorderFetcher = useFetcher();
   const lessonReorderFetcher = useFetcher();
@@ -1312,6 +1330,16 @@ export default function InstructorCourseEditor({
                                                       <Clock className="size-3" />
                                                       {formatDuration(lesson.durationMinutes, true, false, false)}
                                                     </span>
+                                                  )}
+                                                  {commentCounts[lesson.id] > 0 && (
+                                                    <Link
+                                                      to={`/courses/${course.slug}/lessons/${lesson.id}`}
+                                                      title="View comments"
+                                                      className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                                                    >
+                                                      <MessageSquare className="size-3" />
+                                                      {commentCounts[lesson.id]}
+                                                    </Link>
                                                   )}
                                                   <Link
                                                     to={`/courses/${course.slug}/lessons/${lesson.id}`}

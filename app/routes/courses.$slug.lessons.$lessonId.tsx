@@ -26,8 +26,18 @@ import {
   getBestAttempt,
 } from "~/services/quizService";
 import { computeResult } from "~/services/quizScoringService";
+import {
+  MAX_COMMENT_LENGTH,
+  canModerateComments,
+  canPostComment,
+  createComment,
+  deleteComment,
+  getCommentsForLesson,
+} from "~/services/commentService";
 import { LessonProgressStatus } from "~/db/schema";
 import { Button } from "~/components/ui/button";
+import { Textarea } from "~/components/ui/textarea";
+import { UserAvatar } from "~/components/user-avatar";
 import { Card, CardContent } from "~/components/ui/card";
 import {
   AlertTriangle,
@@ -37,6 +47,7 @@ import {
   ChevronRight,
   Circle,
   Clock,
+  MessageSquare,
   Github,
   HelpCircle,
   MapPin,
@@ -45,6 +56,7 @@ import {
   XCircle,
   Trophy,
   RotateCcw,
+  Trash2,
 } from "lucide-react";
 import { cn, formatDuration } from "~/lib/utils";
 import { renderMarkdown } from "~/lib/markdown.server";
@@ -63,6 +75,23 @@ const lessonParamsSchema = z.object({
 
 const markCompleteSchema = z.object({
   intent: z.literal("mark-complete"),
+});
+
+const postCommentSchema = z.object({
+  intent: z.literal("post-comment"),
+  body: z
+    .string()
+    .trim()
+    .min(1, "Comment cannot be empty")
+    .max(
+      MAX_COMMENT_LENGTH,
+      `Comment must be ${MAX_COMMENT_LENGTH} characters or fewer`
+    ),
+});
+
+const deleteCommentSchema = z.object({
+  intent: z.literal("delete-comment"),
+  commentId: z.coerce.number().int(),
 });
 
 export function meta({ data: loaderData }: Route.MetaArgs) {
@@ -248,6 +277,18 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     }
   }
 
+  const canModerate = currentUserId
+    ? canModerateComments(currentUserId, course.id)
+    : false;
+  const comments = getCommentsForLesson(lessonId).map((comment) => ({
+    ...comment,
+    isInstructor: comment.userId === course.instructorId,
+    canDelete: canModerate || comment.userId === currentUserId,
+  }));
+  const canComment = currentUserId
+    ? canPostComment(currentUserId, course.id)
+    : false;
+
   return {
     course: {
       id: courseWithDetails.id,
@@ -281,6 +322,8 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     pppBlocked,
     pppBlockedCountry,
     pppPurchaseCountry,
+    comments,
+    canComment,
   };
 }
 
@@ -329,6 +372,41 @@ export async function action({ params, request }: Route.ActionArgs) {
     }
 
     return { quizResult: result };
+  }
+
+  if (intent === "post-comment") {
+    const parsed = parseFormData(formData, postCommentSchema);
+    if (!parsed.success) {
+      return data(
+        { commentError: Object.values(parsed.errors)[0] ?? "Invalid comment" },
+        { status: 400 }
+      );
+    }
+    try {
+      createComment(currentUserId, lessonId, parsed.data.body);
+    } catch (error) {
+      return data(
+        { commentError: (error as Error).message },
+        { status: 403 }
+      );
+    }
+    return { commentPosted: true };
+  }
+
+  if (intent === "delete-comment") {
+    const parsed = parseFormData(formData, deleteCommentSchema);
+    if (!parsed.success) {
+      throw data("Invalid comment ID", { status: 400 });
+    }
+    try {
+      deleteComment(currentUserId, parsed.data.commentId);
+    } catch (error) {
+      return data(
+        { commentError: (error as Error).message },
+        { status: 403 }
+      );
+    }
+    return { commentDeleted: true };
   }
 
   throw data("Invalid action", { status: 400 });
@@ -382,6 +460,8 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
     pppBlocked,
     pppBlockedCountry,
     pppPurchaseCountry,
+    comments,
+    canComment,
   } = loaderData;
   const [autoplay, toggleAutoplay] = useAutoplay();
   const fetcher = useFetcher({ key: `mark-complete-${lesson.id}` });
@@ -639,10 +719,190 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
               </Link>
             )}
           </div>
+
+          <LessonDiscussion
+            comments={comments}
+            canComment={canComment}
+            isLoggedIn={!!currentUserId}
+            courseSlug={course.slug}
+          />
         </div>
       </div>
     </div>
   );
+}
+
+function LessonDiscussion({
+  comments,
+  canComment,
+  isLoggedIn,
+  courseSlug,
+}: {
+  comments: Array<{
+    id: number;
+    body: string;
+    createdAt: string;
+    authorName: string;
+    authorAvatarUrl: string | null;
+    isInstructor: boolean;
+    canDelete: boolean;
+  }>;
+  canComment: boolean;
+  isLoggedIn: boolean;
+  courseSlug: string;
+}) {
+  const fetcher = useFetcher<{
+    commentError?: string;
+    commentPosted?: boolean;
+    commentDeleted?: boolean;
+  }>();
+  const [body, setBody] = useState("");
+  const isPosting =
+    fetcher.state !== "idle" &&
+    fetcher.formData?.get("intent") === "post-comment";
+
+  useEffect(() => {
+    if (fetcher.state !== "idle" || !fetcher.data) return;
+    if (fetcher.data.commentError) {
+      toast.error(fetcher.data.commentError);
+    } else if (fetcher.data.commentPosted) {
+      setBody("");
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  return (
+    <section className="mt-10 border-t pt-8">
+      <h2 className="mb-6 flex items-center gap-2 text-xl font-semibold">
+        <MessageSquare className="size-5" />
+        Discussion
+        <span className="text-sm font-normal text-muted-foreground">
+          ({comments.length})
+        </span>
+      </h2>
+
+      {comments.length === 0 ? (
+        <p className="mb-6 text-sm text-muted-foreground">
+          No comments yet.{canComment && " Start the discussion!"}
+        </p>
+      ) : (
+        <ul className="mb-8 space-y-6">
+          {comments.map((comment) => (
+            <li key={comment.id} className="flex gap-3">
+              <UserAvatar
+                name={comment.authorName}
+                avatarUrl={comment.authorAvatarUrl}
+              />
+              <div className="min-w-0 flex-1">
+                <div className="mb-1 flex flex-wrap items-center gap-2 text-sm">
+                  <span className="font-medium">{comment.authorName}</span>
+                  {comment.isInstructor && (
+                    <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+                      Instructor
+                    </span>
+                  )}
+                  <span className="text-muted-foreground" suppressHydrationWarning>
+                    {formatRelativeTime(comment.createdAt)}
+                  </span>
+                  {comment.canDelete && (
+                    <fetcher.Form method="post" className="ml-auto">
+                      <input
+                        type="hidden"
+                        name="intent"
+                        value="delete-comment"
+                      />
+                      <input
+                        type="hidden"
+                        name="commentId"
+                        value={comment.id}
+                      />
+                      <Button
+                        type="submit"
+                        variant="ghost"
+                        size="sm"
+                        aria-label="Delete comment"
+                        className="h-7 px-2 text-muted-foreground hover:text-destructive"
+                      >
+                        <Trash2 className="size-4" />
+                      </Button>
+                    </fetcher.Form>
+                  )}
+                </div>
+                <p className="whitespace-pre-wrap break-words text-sm">
+                  {comment.body}
+                </p>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {canComment ? (
+        <fetcher.Form method="post" className="space-y-2">
+          <input type="hidden" name="intent" value="post-comment" />
+          <Textarea
+            name="body"
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            placeholder="Ask a question or share a thought..."
+            maxLength={MAX_COMMENT_LENGTH}
+            rows={3}
+            required
+          />
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-muted-foreground">
+              {body.length}/{MAX_COMMENT_LENGTH}
+            </span>
+            <Button type="submit" disabled={isPosting || !body.trim()}>
+              {isPosting ? "Posting..." : "Post comment"}
+            </Button>
+          </div>
+        </fetcher.Form>
+      ) : (
+        <Card>
+          <CardContent className="py-6 text-center text-sm text-muted-foreground">
+            {isLoggedIn ? (
+              <>
+                <Link
+                  to={`/courses/${courseSlug}`}
+                  className="font-medium text-foreground underline"
+                >
+                  Enroll in this course
+                </Link>{" "}
+                to join the discussion.
+              </>
+            ) : (
+              <>
+                <Link
+                  to="/login"
+                  className="font-medium text-foreground underline"
+                >
+                  Log in
+                </Link>{" "}
+                to join the discussion.
+              </>
+            )}
+          </CardContent>
+        </Card>
+      )}
+    </section>
+  );
+}
+
+function formatRelativeTime(iso: string) {
+  const seconds = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+  const units: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+    ["year", 31536000],
+    ["month", 2592000],
+    ["week", 604800],
+    ["day", 86400],
+    ["hour", 3600],
+    ["minute", 60],
+  ];
+  for (const [unit, size] of units) {
+    if (seconds >= size) return rtf.format(-Math.floor(seconds / size), unit);
+  }
+  return "just now";
 }
 
 function CurriculumSidebar({
